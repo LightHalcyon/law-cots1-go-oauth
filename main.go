@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -21,6 +22,13 @@ type AuthData struct {
 type UserDatabase struct {
 	FullName string
 	Password string
+}
+
+type TokenDetails struct {
+	Username     string
+	ClientID     string
+	RefreshToken string
+	Expires      time.Time
 }
 
 type ErrorResponse struct {
@@ -78,8 +86,64 @@ func Token(w http.ResponseWriter, r *http.Request) {
 				Scope:        nil,
 				RefreshToken: TokenGenerator(),
 			}
-			dbToken.Set(r.Form["username"][0], response.AccessToken, cache.DefaultExpiration)
+			tokenDetails := TokenDetails{
+				Username:     r.Form["username"][0],
+				ClientID:     r.Form["client_id"][0],
+				RefreshToken: response.RefreshToken,
+				Expires:      time.Now().Local().Add(time.Minute * 5),
+			}
+			dbToken.Set(response.AccessToken, tokenDetails, cache.DefaultExpiration)
 			json.NewEncoder(w).Encode(response)
+		}
+	}
+}
+
+func Resource(w http.ResponseWriter, r *http.Request) {
+	type Response struct {
+		AccessToken  string `json:"access_token"`
+		ClientID     string `json:"client_id"`
+		UserID       string `json:"user_id"`
+		FullName     string `json:"full_name"`
+		Expires      int    `json:"expires"`
+		RefreshToken string `json:"refresh_token"`
+	}
+
+	authToken := strings.Split(r.Header.Get("Authorization"), " ")[1]
+	tokenDetails, found := dbToken.Get(authToken)
+	if !found {
+		w.WriteHeader(http.StatusUnauthorized)
+		errorResp := ErrorResponse{
+			Error:       "invalid_token",
+			Description: "Token salah/expired",
+		}
+		json.NewEncoder(w).Encode(errorResp)
+	} else {
+		if tokenData, ok := tokenDetails.(TokenDetails); ok {
+			if time.Now().After(tokenData.Expires) {
+				w.WriteHeader(http.StatusUnauthorized)
+				errorResp := ErrorResponse{
+					Error:       "invalid_token",
+					Description: "Token salah/expired",
+				}
+				json.NewEncoder(w).Encode(errorResp)
+			} else {
+				response := Response{
+					AccessToken:  authToken,
+					ClientID:     tokenData.ClientID,
+					UserID:       tokenData.Username,
+					FullName:     userDb[tokenData.Username].FullName,
+					Expires:      int(tokenData.Expires.Sub(time.Now()).Seconds()),
+					RefreshToken: tokenData.RefreshToken,
+				}
+				json.NewEncoder(w).Encode(response)
+			}
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			errorResp := ErrorResponse{
+				Error:       "read_db_fail",
+				Description: "Kesalahan dalam membaca database",
+			}
+			json.NewEncoder(w).Encode(errorResp)
 		}
 	}
 }
@@ -99,6 +163,7 @@ func main() {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/oauth/token", Token).Methods("POST")
+	router.HandleFunc("/oauth/resource", Resource).Methods("GET")
 
 	log.Fatal(http.ListenAndServe("0.0.0.0:20604", router))
 }
